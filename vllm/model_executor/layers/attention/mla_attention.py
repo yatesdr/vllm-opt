@@ -422,6 +422,46 @@ def _preallocate_absorbed_mla_weights(
     )
     return pre_w_uv, pre_w_uk_t
 
+_KV_B_PROJ_SOURCE_PARAMETERS = ("weight", "weight_scale")
+
+
+def _materialize_kv_b_proj_weight(
+    layer: torch.nn.Module,
+    *,
+    out_dtype: torch.dtype,
+    fallback_device: torch.device | None,
+) -> torch.Tensor:
+    """Return kv_b_proj weights, including after source storage was released."""
+    source_names = ("weight", "qweight", "weight_packed")
+    if any(
+        isinstance(getattr(layer, name, None), torch.Tensor) for name in source_names
+    ):
+        return get_and_maybe_dequant_weights(layer, out_dtype=out_dtype)
+
+    packed = getattr(layer, "b12x_mxfp8_packed_weight", None)
+    quant_method = getattr(layer, "quant_method", None)
+    if packed is None or quant_method is None or fallback_device is None:
+        return get_and_maybe_dequant_weights(layer, out_dtype=out_dtype)
+
+    identity = torch.eye(
+        layer.input_size_per_partition,
+        dtype=out_dtype,
+        device=fallback_device,
+    )
+    return quant_method.apply(layer, identity, bias=None).to(out_dtype).T
+
+
+def _release_b12x_mxfp8_kv_b_proj(layer: torch.nn.Module) -> bool:
+    """Drop source tensors after B12X has produced the absorbed MLA pair."""
+    if getattr(layer, "b12x_mxfp8_packed_weight", None) is None:
+        return False
+
+    for name in _KV_B_PROJ_SOURCE_PARAMETERS:
+        if hasattr(layer, name):
+            delattr(layer, name)
+    layer.b12x_mxfp8_packed_weight = None
+    return True
+
 
 def _can_use_b12x_dcp_prefill_workspace(
     *,
@@ -1773,8 +1813,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
+        fallback_device = self.W_UV.device if hasattr(self, "W_UV") else None
+        kv_b_proj_weight = _materialize_kv_b_proj_weight(
+            self.kv_b_proj,
+            out_dtype=act_dtype,
+            fallback_device=fallback_device,
         ).T
 
         assert kv_b_proj_weight.shape == (
@@ -1865,6 +1908,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 pre_w_uk_t.copy_(w_uk_t)
                 w_uk_t = pre_w_uk_t
             replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
+
+        if self.impl.can_release_kv_b_proj_after_loading:
+            if self.prefill_backend is not None:
+                raise RuntimeError(
+                    "An MLA backend cannot release kv_b_proj while MHA prefill "
+                    "is enabled."
+                )
+            _release_b12x_mxfp8_kv_b_proj(self.kv_b_proj)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
