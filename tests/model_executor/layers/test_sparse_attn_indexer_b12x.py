@@ -1058,6 +1058,33 @@ def test_b12x_paged_profile_rows_follow_logits_budget(monkeypatch):
     assert indexer_mod._get_b12x_paged_indexer_profile_q_rows(q_rows=1024) == 1024
 
 
+@pytest.mark.parametrize(
+    ("is_sm100_family", "next_n", "use_b12x_indexer", "expected"),
+    [
+        (True, 4, False, False),
+        (False, 4, False, True),
+        (False, 4, True, False),
+        (False, 2, False, False),
+    ],
+)
+def test_mtp_indexer_flattening_policy(
+    is_sm100_family,
+    next_n,
+    use_b12x_indexer,
+    expected,
+):
+    from vllm.v1.attention.backends.mla import indexer as mla_indexer_mod
+
+    assert (
+        mla_indexer_mod._should_flatten_mtp_indexer(
+            is_sm100_family=is_sm100_family,
+            next_n=next_n,
+            use_b12x_indexer=use_b12x_indexer,
+        )
+        is expected
+    )
+
+
 def test_b12x_schedule_metadata_uses_canonical_indexer_import(monkeypatch):
     calls: list[tuple] = []
     _install_fake_b12x_indexer(monkeypatch, calls)

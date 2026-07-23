@@ -44,6 +44,20 @@ def _align_block_table_width(num_blocks: int, block_size: int) -> int:
     return cdiv(num_blocks, alignment) * alignment
 
 
+def _should_flatten_mtp_indexer(
+    *,
+    is_sm100_family: bool,
+    next_n: int,
+    use_b12x_indexer: bool,
+) -> bool:
+    """Return whether MTP decode must use the DeepGEMM flatten fallback."""
+    return (
+        not is_sm100_family
+        and next_n not in (1, 2)
+        and not use_b12x_indexer
+    )
+
+
 @triton.jit
 def _prepare_uniform_decode_kernel(
     seq_lens_ptr,
@@ -407,10 +421,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             use_b12x_sparse_indexer,
         )
 
-        self.use_flattening = (
-            not current_platform.is_device_capability_family(100)
-            and next_n not in (1, 2)
-            and not use_b12x_sparse_indexer()
+        self.use_flattening = _should_flatten_mtp_indexer(
+            is_sm100_family=current_platform.is_device_capability_family(100),
+            next_n=next_n,
+            use_b12x_indexer=use_b12x_sparse_indexer(),
         )
         # SM100 supports the varlen paged MQA logits kernel (indices-selected,
         # next_n == 1 rows). Only compact spec-decode verification batches opt
