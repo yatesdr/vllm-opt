@@ -84,7 +84,11 @@ def test_mla_post_load_preallocates_quantized_absorbed_weights(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.quant_config = None
     layer.layer_name = "test"
-    layer.impl = SimpleNamespace(can_release_kv_b_proj_after_loading=False)
+    layer.kv_cache_dtype = "auto"
+    layer.impl = SimpleNamespace(
+        can_release_kv_b_proj_after_loading=False,
+        supports_quant_query_input=False,
+    )
     dequantized = torch.arange(28.0, dtype=torch.float32).reshape(14, 2)
     events = []
     preallocated = []
@@ -273,7 +277,11 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.quant_config = None
     layer.layer_name = "test"
-    layer.impl = SimpleNamespace(can_release_kv_b_proj_after_loading=False)
+    layer.kv_cache_dtype = "auto"
+    layer.impl = SimpleNamespace(
+        can_release_kv_b_proj_after_loading=False,
+        supports_quant_query_input=False,
+    )
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
@@ -389,7 +397,11 @@ def test_b12x_absorb_bmm_unsupported_pack_uses_materialized_pair(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.quant_config = None
     layer.layer_name = "test"
-    layer.impl = SimpleNamespace(can_release_kv_b_proj_after_loading=False)
+    layer.kv_cache_dtype = "auto"
+    layer.impl = SimpleNamespace(
+        can_release_kv_b_proj_after_loading=False,
+        supports_quant_query_input=False,
+    )
 
     monkeypatch.setattr(mla_attention_module, "_b12x_absorb_bmm_enabled", lambda: True)
     monkeypatch.setattr(
@@ -827,7 +839,11 @@ def test_b12x_mxfp8_mla_post_load_releases_absorbed_sources(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.quant_config = None
     layer.layer_name = "test"
-    layer.impl = SimpleNamespace(can_release_kv_b_proj_after_loading=True)
+    layer.kv_cache_dtype = "auto"
+    layer.impl = SimpleNamespace(
+        can_release_kv_b_proj_after_loading=True,
+        supports_quant_query_input=False,
+    )
     layer.prefill_backend = None
 
     monkeypatch.setattr(
