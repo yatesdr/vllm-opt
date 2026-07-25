@@ -66,6 +66,37 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("fp8_attention", "supports_outer_quant", "requires_precise", "expected"),
+    [
+        (False, False, False, False),
+        (False, True, True, False),
+        (True, False, False, False),
+        (True, True, False, True),
+        # B12X case: BF16 enters the backend and the quantized-KV math is
+        # internal, so supports_quant_query_input remains false.
+        (True, False, True, True),
+    ],
+)
+def test_precise_mla_query_bmm_route(
+    fp8_attention,
+    supports_outer_quant,
+    requires_precise,
+    expected,
+):
+    impl = SimpleNamespace(
+        supports_quant_query_input=supports_outer_quant,
+        requires_precise_query_projection=requires_precise,
+    )
+    assert (
+        mla_attention_module._requires_precise_mla_query_bmm(
+            fp8_attention, impl
+        )
+        is expected
+    )
+
+
+@pytest.mark.cpu_test
 def test_mla_post_load_preallocates_quantized_absorbed_weights(monkeypatch):
     layer = MLAAttention.__new__(MLAAttention)
     torch.nn.Module.__init__(layer)

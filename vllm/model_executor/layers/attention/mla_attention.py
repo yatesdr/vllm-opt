@@ -339,6 +339,23 @@ def _run_mla_query_bmm(
     torch.bmm(query.contiguous() if use_safe_op else query, weight, out=output)
 
 
+def _requires_precise_mla_query_bmm(
+    fp8_attention: bool,
+    impl: MLAAttentionImpl,
+) -> bool:
+    """Whether query absorption must preserve its FP32 reduction.
+
+    ``supports_quant_query_input`` only describes queries quantized by the
+    outer attention layer.  B12X deliberately leaves that false because it
+    accepts BF16 and owns the quantized-KV math internally, so its separate
+    capability must participate in this decision.
+    """
+    return fp8_attention and (
+        impl.supports_quant_query_input
+        or getattr(impl, "requires_precise_query_projection", False)
+    )
+
+
 @functools.cache
 def _b12x_absorb_bmm_enabled() -> bool:
     return envs.VLLM_B12X_ABSORB_BMM
@@ -1337,9 +1354,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                             self._dequant_b12x_absorbed_pair()[0],
                             mqa_ql_nope,
                             use_safe_op=self.use_safe_mla_query_bmm,
-                            precise=(
-                                fp8_attention
-                                and self.impl.supports_quant_query_input
+                            precise=_requires_precise_mla_query_bmm(
+                                fp8_attention, self.impl
                             ),
                         )
                 else:
@@ -1348,8 +1364,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         self.W_UK_T,
                         mqa_ql_nope,
                         use_safe_op=self.use_safe_mla_query_bmm,
-                        precise=(
-                            fp8_attention and self.impl.supports_quant_query_input
+                        precise=_requires_precise_mla_query_bmm(
+                            fp8_attention, self.impl
                         ),
                     )
 

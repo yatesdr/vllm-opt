@@ -1076,6 +1076,12 @@ class AttentionImplBase(ABC, Generic[T]):
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
 
+    # Whether query absorption feeding a quantized KV backend must forbid
+    # reduced-precision intermediate reductions.  This is separate from
+    # supports_quant_query_input: a backend may accept BF16 queries and
+    # quantize or otherwise consume them in a low-precision kernel internally.
+    requires_precise_query_projection: bool = False
+
     dcp_world_size: int
     dcp_rank: int
 

@@ -1220,6 +1220,11 @@ class B12xMLASparseImpl(MLAAttentionImpl[B12xMLASparseMetadata]):
     supports_dcp_gather_query_in_workspace: bool = True
     supports_dcp_project_before_merge_in_workspace: bool = True
     supports_dcp_reduce_scatter_output_in_workspace: bool = True
+    # B12X accepts a BF16 query and owns the quantized-KV attention math
+    # internally.  It therefore cannot advertise supports_quant_query_input,
+    # but BF16 query-absorption reductions still sit directly on a
+    # low-precision attention boundary.
+    requires_precise_query_projection: bool = True
     # Cross-layer CKV prefetch state must exist before the first backend
     # instance so profile-cache cleanup is independent of construction order.
     _all_layer_kv_caches: list[torch.Tensor | None] = []
