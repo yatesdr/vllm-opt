@@ -85,21 +85,38 @@ void safe_mla_query_bmm(torch::stable::Tensor const& query,
 
   const float alpha = 1.0f;
   const float beta = 0.0f;
-  const cublasComputeType_t compute_type =
-      precise ? CUBLAS_COMPUTE_32F_PEDANTIC : CUBLAS_COMPUTE_32F;
-  check_cublas(
-      cublasGemmStridedBatchedEx(
-          handle, CUBLAS_OP_N, CUBLAS_OP_N, latent_dim, tokens, q_dim, &alpha,
-          weight.const_data_ptr(), CUDA_R_16BF, weight_ld,
-          static_cast<long long>(weight.stride(0)), query.const_data_ptr(),
-          CUDA_R_16BF, query_ld, static_cast<long long>(query.stride(0)),
-          &beta, output.mutable_data_ptr(), CUDA_R_16BF, output_ld,
-          static_cast<long long>(output.stride(0)), heads,
-          // Regular FP32 keeps tensor-core kernels eligible. The precise path
-          // preserves the pre-tensor-core accumulation contract at numeric
-          // boundaries that are immediately requantized to FP8.
-          compute_type, CUBLAS_GEMM_DEFAULT),
-      "cublasGemmStridedBatchedEx");
+  cublasMath_t original_math_mode = CUBLAS_DEFAULT_MATH;
+  if (precise) {
+    check_cublas(cublasGetMathMode(handle, &original_math_mode),
+                 "cublasGetMathMode");
+    const auto precise_math_mode = static_cast<cublasMath_t>(
+        static_cast<int>(original_math_mode) |
+        static_cast<int>(CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION));
+    check_cublas(cublasSetMathMode(handle, precise_math_mode),
+                 "cublasSetMathMode(precise)");
+  }
+
+  const cublasStatus_t gemm_status = cublasGemmStridedBatchedEx(
+      handle, CUBLAS_OP_N, CUBLAS_OP_N, latent_dim, tokens, q_dim, &alpha,
+      weight.const_data_ptr(), CUDA_R_16BF, weight_ld,
+      static_cast<long long>(weight.stride(0)), query.const_data_ptr(),
+      CUDA_R_16BF, query_ld, static_cast<long long>(query.stride(0)), &beta,
+      output.mutable_data_ptr(), CUDA_R_16BF, output_ld,
+      static_cast<long long>(output.stride(0)), heads,
+      // Keep tensor-core-eligible FP32 compute. For values that are
+      // immediately requantized to FP8, forbid split-K/intermediate
+      // reductions from accumulating in the BF16 output type.
+      CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+
+  // The PyTorch cuBLAS handle is shared infrastructure. Restore its exact
+  // incoming mode even when GEMM fails so this operator cannot alter later
+  // library calls.
+  cublasStatus_t restore_status = CUBLAS_STATUS_SUCCESS;
+  if (precise) {
+    restore_status = cublasSetMathMode(handle, original_math_mode);
+  }
+  check_cublas(gemm_status, "cublasGemmStridedBatchedEx");
+  check_cublas(restore_status, "cublasSetMathMode(restore)");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {

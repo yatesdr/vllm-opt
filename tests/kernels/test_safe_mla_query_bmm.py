@@ -37,7 +37,13 @@ def test_safe_mla_query_bmm_matches_torch_bmm(
         tokens, heads, q_dim + rope_dim, dtype=torch.bfloat16, device=device
     )
     query = query_storage[..., :q_dim].transpose(0, 1)
-    weight = torch.randn(heads, q_dim, latent_dim, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(
+        heads,
+        q_dim,
+        latent_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
     output = torch.empty(heads, tokens, latent_dim, dtype=torch.bfloat16, device=device)
 
     assert not query.is_contiguous()
@@ -127,6 +133,33 @@ def test_precise_safe_mla_query_bmm_preserves_fp8_boundary():
 
     assert saw_bf16_difference
     assert saw_fp8_difference
+
+
+def test_precise_safe_mla_query_bmm_restores_math_mode():
+    _require_safe_mla_query_bmm()
+    device = torch.device("cuda")
+    heads = 8
+    tokens = 3072
+    q_dim = 192
+    latent_dim = 512
+    torch.manual_seed(41)
+
+    query_storage = torch.randn(
+        tokens, heads, q_dim + 64, dtype=torch.bfloat16, device=device
+    )
+    query = query_storage[..., :q_dim].transpose(0, 1)
+    weight = torch.randn(heads, q_dim, latent_dim, dtype=torch.bfloat16, device=device)
+    regular_before = torch.empty(
+        heads, tokens, latent_dim, dtype=torch.bfloat16, device=device
+    )
+    precise = torch.empty_like(regular_before)
+    regular_after = torch.empty_like(regular_before)
+
+    torch.ops._C.safe_mla_query_bmm(query, weight, regular_before, False)
+    torch.ops._C.safe_mla_query_bmm(query, weight, precise, True)
+    torch.ops._C.safe_mla_query_bmm(query, weight, regular_after, False)
+
+    assert torch.equal(regular_before, regular_after)
 
 
 @pytest.mark.parametrize("precise", [False, True])
