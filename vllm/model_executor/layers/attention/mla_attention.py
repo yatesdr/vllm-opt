@@ -309,6 +309,7 @@ def _run_mla_query_bmm(
     output: torch.Tensor,
     *,
     use_safe_op: bool,
+    precise: bool = False,
 ) -> None:
     if (
         use_safe_op
@@ -325,8 +326,13 @@ def _run_mla_query_bmm(
         except AttributeError:
             safe_bmm = None
         if safe_bmm is not None:
-            safe_bmm(query, weight, output)
+            safe_bmm(query, weight, output, precise)
             return
+        if precise:
+            raise RuntimeError(
+                "Precise MLA query projection requires "
+                "torch.ops._C.safe_mla_query_bmm"
+            )
 
     # Fallback for CPU tests, non-BF16 paths, and builds without the CUDA op.
     # The copy keeps tight DCP/custom-allocation query views out of torch.bmm.
@@ -1331,6 +1337,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                             self._dequant_b12x_absorbed_pair()[0],
                             mqa_ql_nope,
                             use_safe_op=self.use_safe_mla_query_bmm,
+                            precise=(
+                                fp8_attention
+                                and self.impl.supports_quant_query_input
+                            ),
                         )
                 else:
                     _run_mla_query_bmm(
@@ -1338,6 +1348,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         self.W_UK_T,
                         mqa_ql_nope,
                         use_safe_op=self.use_safe_mla_query_bmm,
+                        precise=(
+                            fp8_attention and self.impl.supports_quant_query_input
+                        ),
                     )
 
                 # Convert from (N, B, L) to (B, N, L)

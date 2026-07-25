@@ -202,7 +202,7 @@ void merge_attn_states(
 // DCP/custom-allocation inputs without materializing the query operand.
 void safe_mla_query_bmm(torch::stable::Tensor const& query,
                         torch::stable::Tensor const& weight,
-                        torch::stable::Tensor& output);
+                        torch::stable::Tensor& output, bool precise);
 
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);

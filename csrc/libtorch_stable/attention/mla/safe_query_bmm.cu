@@ -42,7 +42,7 @@ void check_bf16_cuda_3d(torch::stable::Tensor const& tensor,
 
 void safe_mla_query_bmm(torch::stable::Tensor const& query,
                         torch::stable::Tensor const& weight,
-                        torch::stable::Tensor& output) {
+                        torch::stable::Tensor& output, bool precise) {
   check_bf16_cuda_3d(query, "query");
   check_bf16_cuda_3d(weight, "weight");
   check_bf16_cuda_3d(output, "output");
@@ -85,6 +85,8 @@ void safe_mla_query_bmm(torch::stable::Tensor const& query,
 
   const float alpha = 1.0f;
   const float beta = 0.0f;
+  const cublasComputeType_t compute_type =
+      precise ? CUBLAS_COMPUTE_32F_PEDANTIC : CUBLAS_COMPUTE_32F;
   check_cublas(
       cublasGemmStridedBatchedEx(
           handle, CUBLAS_OP_N, CUBLAS_OP_N, latent_dim, tokens, q_dim, &alpha,
@@ -93,11 +95,10 @@ void safe_mla_query_bmm(torch::stable::Tensor const& query,
           CUDA_R_16BF, query_ld, static_cast<long long>(query.stride(0)),
           &beta, output.mutable_data_ptr(), CUDA_R_16BF, output_ld,
           static_cast<long long>(output.stride(0)), heads,
-          // The explicit operand order and leading dimensions provide the
-          // tight-query contract. Regular FP32 accumulation keeps tensor-core
-          // kernels eligible; PEDANTIC forces a much slower fallback for
-          // production prefill shapes without improving that contract.
-          CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+          // Regular FP32 keeps tensor-core kernels eligible. The precise path
+          // preserves the pre-tensor-core accumulation contract at numeric
+          // boundaries that are immediately requantized to FP8.
+          compute_type, CUBLAS_GEMM_DEFAULT),
       "cublasGemmStridedBatchedEx");
 }
 
