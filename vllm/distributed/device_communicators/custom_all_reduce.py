@@ -31,6 +31,12 @@ except Exception:
 
 logger = init_logger(__name__)
 
+# The eager scheduler has one stable all-reduce stream owner.  Never derive
+# this identity from a process-local CUDA stream handle; SparkInfer deliberately
+# fails closed if the same logical owner is rebound to a second eager stream.
+_B12X_PCIE_EAGER_CHANNEL_ID = "vllm:eager:allreduce"
+_B12X_PCIE_MAX_CONCURRENT_CHANNELS = 2
+
 
 def _get_pcie_allreduce_backend() -> str:
     backend = envs.VLLM_PCIE_ALLREDUCE_BACKEND.lower()
@@ -488,8 +494,15 @@ class CustomAllreduce:
                     eager_buffer_bytes=pcie_oneshot_buffer_size,
                     max_size=pcie_oneshot_buffer_size,
                     single_channel=pcie_single_channel,
+                    max_concurrent_channels=_B12X_PCIE_MAX_CONCURRENT_CHANNELS,
                 )
-                pcie_runtime.for_stream()
+                if not pcie_single_channel:
+                    pcie_runtime.prepare_channels((_B12X_PCIE_EAGER_CHANNEL_ID,))
+                pcie_runtime.for_stream(
+                    channel_id=(
+                        None if pcie_single_channel else _B12X_PCIE_EAGER_CHANNEL_ID
+                    )
+                )
             except Exception as exc:
                 pcie_init_error = exc
 
@@ -655,12 +668,26 @@ class CustomAllreduce:
         ops.register_buffer(self._ptr, self.buffer_ptrs)
 
     @contextmanager
-    def capture(self, stream: torch.cuda.Stream | None = None):
+    def capture(
+        self,
+        stream: torch.cuda.Stream | None = None,
+        *,
+        channel_id: str | None = None,
+    ):
         """Bind communicator resources to the enclosing CUDA graph capture.
 
         Legacy custom all-reduce registers graph buffers on exit. SparkInfer
         PCIe channels are instead created on the graph's owning stream and
         remain valid for the graph lifetime.
+
+        Args:
+            stream: CUDA stream owned by the enclosing graph capture.
+            channel_id: Stable identity shared by every rank for this graph
+                owner. Required when the SparkInfer PCIe runtime is active.
+
+        Raises:
+            RuntimeError: If the PCIe runtime is active and ``channel_id`` is
+                ``None``.
         """
         old_pcie_capture_stream = self._pcie_capture_stream
         try:
@@ -668,8 +695,16 @@ class CustomAllreduce:
             if self._pcie_runtime is None:
                 yield
             else:
+                if channel_id is None:
+                    raise RuntimeError(
+                        "distributed PCIe graph capture requires an explicit "
+                        "semantic channel_id"
+                    )
                 self._pcie_capture_stream = stream
-                with self._pcie_runtime.capture(stream=stream):
+                with self._pcie_runtime.capture(
+                    stream=stream,
+                    channel_id=channel_id,
+                ):
                     yield
         finally:
             self._pcie_capture_stream = old_pcie_capture_stream
@@ -727,7 +762,8 @@ class CustomAllreduce:
     def register_graph_buffers(self):
         if self._pcie_runtime is not None:
             self._pcie_runtime.for_stream(
-                self._pcie_runtime_stream()
+                self._pcie_runtime_stream(),
+                channel_id=_B12X_PCIE_EAGER_CHANNEL_ID,
             ).register_graph_buffers()
             return
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
@@ -757,7 +793,8 @@ class CustomAllreduce:
                 self._pcie_allreduce_max_size is not None
                 and inp_size <= self._pcie_allreduce_max_size
                 and self._pcie_runtime.for_stream(
-                    self._pcie_runtime_stream()
+                    self._pcie_runtime_stream(),
+                    channel_id=_B12X_PCIE_EAGER_CHANNEL_ID,
                 ).should_allreduce(inp)
             )
             if (
@@ -836,7 +873,10 @@ class CustomAllreduce:
                     self._pcie_runtime_stream() is not None,
                 )
             return self._pcie_runtime.all_reduce(
-                inp, out=out, stream=self._pcie_runtime_stream()
+                inp,
+                out=out,
+                stream=self._pcie_runtime_stream(),
+                channel_id=_B12X_PCIE_EAGER_CHANNEL_ID,
             )
         if out is None:
             out = torch.empty_like(inp)
@@ -878,7 +918,8 @@ class CustomAllreduce:
             return False
         assert self._pcie_runtime is not None
         if not self._pcie_runtime.for_stream(
-            self._pcie_runtime_stream()
+            self._pcie_runtime_stream(),
+            channel_id=_B12X_PCIE_EAGER_CHANNEL_ID,
         ).should_allreduce(inp):
             return False
         if (
@@ -905,6 +946,7 @@ class CustomAllreduce:
             out=inp,
             residual_out=residual,
             stream=self._pcie_runtime_stream(),
+            channel_id=_B12X_PCIE_EAGER_CHANNEL_ID,
         )
         return True
 
@@ -932,12 +974,12 @@ class CustomAllreduce:
             return self.all_reduce(input, registered=False)
 
     def close(self):
-        if self._pcie_dma is not None:
-            self._pcie_dma.close()
-            self._pcie_dma = None
         if self._pcie_runtime is not None:
             self._pcie_runtime.close()
             self._pcie_runtime = None
+        if self._pcie_dma is not None:
+            self._pcie_dma.close()
+            self._pcie_dma = None
         if not self.disabled and self._ptr:
             if ops is not None:
                 ops.dispose(self._ptr)
@@ -945,7 +987,16 @@ class CustomAllreduce:
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
 
-    def __del__(self):
+    def __del__(self) -> None:
+        # A finalizer cannot collectively close SparkInfer after another rank
+        # has exited or vLLM has destroyed the process group. The backend owns
+        # abnormal resource finalization; explicit close() is coordinated by
+        # CudaCommunicator.destroy() while both process groups are still live.
+        if (
+            getattr(self, "_pcie_runtime", None) is not None
+            or getattr(self, "_pcie_dma", None) is not None
+        ):
+            return
         self.close()
 
     @staticmethod
