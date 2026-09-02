@@ -369,6 +369,44 @@ def _select_mqa_query(
     return q[:num_mqa_tokens], False
 
 
+def _estimate_dcp_ag_rs_transient_bytes(
+    *,
+    num_tokens: int,
+    local_heads: int,
+    dcp_world_size: int,
+    query_head_dim: int,
+    output_head_dim: int,
+    query_element_size: int,
+    output_element_size: int,
+) -> int:
+    """Upper-bound simultaneously live eager DCP AG/RS tensors.
+
+    The ordinary model profile has no scheduler attention metadata and does
+    not execute these collectives.  Account for their runtime tensor lifetime
+    explicitly instead of depending on allocator slack.
+    """
+    if num_tokens <= 0 or local_heads <= 0 or dcp_world_size <= 1:
+        return 0
+
+    global_heads = local_heads * dcp_world_size
+    gathered_query = (
+        num_tokens * global_heads * query_head_dim * query_element_size
+    )
+    attention_output = (
+        num_tokens * global_heads * output_head_dim * output_element_size
+    )
+    # CUDACommunicator.reduce_scatter materializes a head-major contiguous
+    # input, a local output, and a token-major contiguous return while the
+    # original attention output is still live.
+    reduce_scatter = attention_output + (
+        2 * num_tokens * local_heads * output_head_dim * output_element_size
+    )
+    gathered_lse = (
+        (dcp_world_size + 1) * num_tokens * global_heads * torch.float32.itemsize
+    )
+    return gathered_query + attention_output + reduce_scatter + gathered_lse
+
+
 def _canonicalize_sparse_mla_kv_cache_dtype(
     attn_backend: type[AttentionBackend],
     kv_cache_dtype: CacheDType,
@@ -540,6 +578,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         dtype = torch.get_default_dtype()
+        self.dtype = dtype
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
                 f"MLAAttention: attn_backend must be an MLA backend, "
@@ -725,6 +764,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
+        )
+
+    def get_dcp_prefill_transient_memory_bytes(self) -> int:
+        """Return DCP collective headroom omitted by the dummy profile."""
+        if self.dcp_manager is None:
+            return 0
+        # Use the model activation width for the query even when the selected
+        # attention kernel accepts FP8.  This is a deliberate upper bound that
+        # also covers fallback paths which gather the BF16 query.
+        return _estimate_dcp_ag_rs_transient_bytes(
+            num_tokens=self.dcp_manager.max_num_tokens,
+            local_heads=self.num_heads,
+            dcp_world_size=self.impl.dcp_world_size,
+            query_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+            output_head_dim=self.kv_lora_rank,
+            query_element_size=self.dtype.itemsize,
+            output_element_size=self.dtype.itemsize,
         )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:

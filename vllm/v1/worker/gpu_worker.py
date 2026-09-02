@@ -568,7 +568,16 @@ class Worker(WorkerBase):
         )
 
         self.total_consumed = profile_result.total_consumed
-        self.transient_peak_headroom = profile_result.transient_peak_headroom
+        get_dcp_reserve = getattr(
+            self.model_runner, "get_dcp_prefill_transient_memory_bytes", None
+        )
+        dcp_prefill_transient_memory = (
+            int(get_dcp_reserve()) if callable(get_dcp_reserve) else 0
+        )
+        self.dcp_prefill_transient_memory = dcp_prefill_transient_memory
+        self.transient_peak_headroom = (
+            profile_result.transient_peak_headroom + dcp_prefill_transient_memory
+        )
         self.post_profile_persistent_memory = post_profile_persistent_memory
         self.peak_activation_memory = (
             self.transient_peak_headroom + cudagraph_memory_estimate_applied
@@ -591,6 +600,7 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
             - post_profile_persistent_memory
+            - dcp_prefill_transient_memory
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -615,6 +625,12 @@ class Worker(WorkerBase):
                 "Reserved %s GiB for persistent GPU memory initialized after "
                 "the main model profile.",
                 format_gib(post_profile_persistent_memory),
+            )
+        if dcp_prefill_transient_memory > 0:
+            logger.info_once(
+                "Reserved %s GiB for eager DCP prefill collectives omitted "
+                "by the scheduler-free model profile.",
+                format_gib(dcp_prefill_transient_memory),
             )
 
         if cudagraph_memory_estimate > 0:

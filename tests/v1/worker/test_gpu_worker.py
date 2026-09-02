@@ -211,3 +211,60 @@ def test_post_profile_persistent_memory_reduces_kv_budget(monkeypatch):
     assert available == 58
     assert worker.transient_peak_headroom == 5
     assert worker.post_profile_persistent_memory == 7
+
+
+def test_dcp_prefill_transient_memory_reduces_kv_budget(monkeypatch):
+    """Scheduler-free profiling must reserve eager DCP collective tensors."""
+    model_runner = SimpleNamespace(
+        model_memory_usage=0,
+        profile_run=lambda: None,
+        profile_cudagraph_memory=lambda: 0,
+        get_dcp_prefill_transient_memory_bytes=lambda: 11,
+    )
+    profile_result = SimpleNamespace(
+        total_consumed=10,
+        transient_peak_headroom=5,
+        after_profile=SimpleNamespace(free_memory=80),
+        non_kv_cache_memory=15,
+    )
+
+    @contextmanager
+    def fake_memory_profiling(*args, **kwargs):
+        yield profile_result
+
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.9,
+        ),
+        model_runner=model_runner,
+        init_snapshot=SimpleNamespace(free_memory=100, total_memory=100),
+        requested_memory=90,
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=gpu_worker.CUDAGraphMode.NONE,
+                cudagraph_capture_sizes=[],
+            )
+        ),
+    )
+
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda worker: None)
+    monkeypatch.setattr(gpu_worker, "memory_profiling", fake_memory_profiling)
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True),
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "reserve_mm_ipc_gpu_memory",
+        lambda requested, *args: requested,
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    assert available == 64
+    assert worker.dcp_prefill_transient_memory == 11
+    assert worker.transient_peak_headroom == 16

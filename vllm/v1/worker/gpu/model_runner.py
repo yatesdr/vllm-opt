@@ -841,6 +841,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert self.pooling_runner is not None
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
+    def get_dcp_prefill_transient_memory_bytes(self) -> int:
+        """Return the largest layer-local DCP collective workspace estimate."""
+        estimates = []
+        for layer in self.compilation_config.static_forward_context.values():
+            estimate = getattr(
+                layer, "get_dcp_prefill_transient_memory_bytes", None
+            )
+            if callable(estimate):
+                estimates.append(int(estimate()))
+        return max(estimates, default=0)
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         if self.supports_mm_inputs and self.is_first_pp_rank:

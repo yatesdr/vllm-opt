@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    _estimate_dcp_ag_rs_transient_bytes,
     _select_mqa_query,
     build_mla_chunked_context_metadata,
 )
@@ -67,6 +68,34 @@ if current_platform.is_rocm():
     BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.cpu_test
+def test_estimate_dcp_ag_rs_transient_bytes() -> None:
+    assert (
+        _estimate_dcp_ag_rs_transient_bytes(
+            num_tokens=4096,
+            local_heads=16,
+            dcp_world_size=4,
+            query_head_dim=576,
+            output_head_dim=512,
+            query_element_size=2,
+            output_element_size=2,
+        )
+        == 978_321_408
+    )
+    assert (
+        _estimate_dcp_ag_rs_transient_bytes(
+            num_tokens=4096,
+            local_heads=16,
+            dcp_world_size=1,
+            query_head_dim=576,
+            output_head_dim=512,
+            query_element_size=2,
+            output_element_size=2,
+        )
+        == 0
+    )
 
 
 @pytest.mark.cpu_test
