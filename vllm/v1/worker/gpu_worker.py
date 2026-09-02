@@ -525,6 +525,8 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
+        free_gpu_memory = profile_result.after_profile.free_memory
+
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
@@ -532,6 +534,7 @@ class Worker(WorkerBase):
         # torch.cuda handle the live capture path already uses on ROCm.
         # XPU stays excluded (see #39977).
         cudagraph_memory_estimate = 0
+        post_profile_persistent_memory = 0
         if (
             current_platform.is_cuda_alike()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -545,6 +548,17 @@ class Worker(WorkerBase):
             )
             b12x_warmup(self, capture_sizes)
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            # CUDA-graph profiling initializes the real attention backends and
+            # their persistent workspaces against a minimal KV cache. Those
+            # allocations survive the throwaway graph cleanup, but happen
+            # after memory_profiling() and were therefore not charged to the
+            # KV-cache budget. Measure the retained delta explicitly. This
+            # also safely accounts for a co-resident connector process that
+            # grows while the worker is profiling.
+            post_cudagraph_free_memory = torch.accelerator.get_memory_info()[0]
+            post_profile_persistent_memory = max(
+                free_gpu_memory - post_cudagraph_free_memory, 0
+            )
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -554,12 +568,22 @@ class Worker(WorkerBase):
         )
 
         self.total_consumed = profile_result.total_consumed
+        get_dcp_reserve = getattr(
+            self.model_runner, "get_dcp_prefill_transient_memory_bytes", None
+        )
+        dcp_prefill_transient_memory = (
+            int(get_dcp_reserve()) if callable(get_dcp_reserve) else 0
+        )
+        self.dcp_prefill_transient_memory = dcp_prefill_transient_memory
+        self.transient_peak_headroom = (
+            profile_result.transient_peak_headroom + dcp_prefill_transient_memory
+        )
+        self.post_profile_persistent_memory = post_profile_persistent_memory
         self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
+            self.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         assert self.init_snapshot.free_memory >= free_gpu_memory, (
@@ -575,6 +599,8 @@ class Worker(WorkerBase):
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
+            - post_profile_persistent_memory
+            - dcp_prefill_transient_memory
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -594,6 +620,18 @@ class Worker(WorkerBase):
             "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
         )
+        if post_profile_persistent_memory > 0:
+            logger.info_once(
+                "Reserved %s GiB for persistent GPU memory initialized after "
+                "the main model profile.",
+                format_gib(post_profile_persistent_memory),
+            )
+        if dcp_prefill_transient_memory > 0:
+            logger.info_once(
+                "Reserved %s GiB for eager DCP prefill collectives omitted "
+                "by the scheduler-free model profile.",
+                format_gib(dcp_prefill_transient_memory),
+            )
 
         if cudagraph_memory_estimate > 0:
             total_mem = self.init_snapshot.total_memory
@@ -785,7 +823,8 @@ class Worker(WorkerBase):
 
             non_kv_cache_memory = (
                 self.total_consumed
-                + self.peak_activation_memory
+                + self.transient_peak_headroom
+                + self.post_profile_persistent_memory
                 + cuda_graph_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
