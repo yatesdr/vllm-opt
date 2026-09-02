@@ -774,7 +774,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # attention kernel accepts FP8.  This is a deliberate upper bound that
         # also covers fallback paths which gather the BF16 query.
         return _estimate_dcp_ag_rs_transient_bytes(
-            num_tokens=self.dcp_manager.max_num_tokens,
+            # The direct DCP workspace is decode-sized. Long sparse prefills
+            # fall back to eager NCCL collectives, so size this reserve for the
+            # full scheduler token budget instead.
+            num_tokens=self._vllm_config.scheduler_config.max_num_batched_tokens,
             local_heads=self.num_heads,
             dcp_world_size=self.impl.dcp_world_size,
             query_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
