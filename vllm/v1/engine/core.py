@@ -679,10 +679,8 @@ class EngineCore:
         if previous_completion is not None:
             service_started_at = max(service_started_at, previous_completion)
         elapsed_seconds = max(completed_at - service_started_at, 0.0)
-        self._last_model_completion_time = (
-            completed_at
-            if previous_completion is None
-            else max(completed_at, previous_completion)
+        self._last_model_completion_time = max(
+            completed_at, previous_completion or completed_at
         )
         self.scheduler.record_compute_time(
             service_class,
