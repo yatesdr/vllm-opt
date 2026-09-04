@@ -154,8 +154,12 @@ class KVCacheCoordinator(ABC):
         # every group to ONE hit length, so a drop anywhere shortens the
         # candidate offered to all of them. A group that kept only its own
         # boundary state would then sit above every reachable candidate.
+        lookup_drops_eagle_block = any(
+            i in self.eagle_group_ids and manager.drops_eagle_block
+            for i, manager in enumerate(self.single_type_managers)
+        )
         for manager in self.single_type_managers:
-            manager.lookup_drops_eagle_block = bool(self.eagle_group_ids)
+            manager.lookup_drops_eagle_block = lookup_drops_eagle_block
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
