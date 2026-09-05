@@ -4801,6 +4801,17 @@ def test_sparse_block_stored_runs(start, mask, null_indices, runs, events_enable
         assert cached == ([blocks[i]] if i in retained else None)
     events = pool.take_events()
     assert len(events) == (len(runs) if events_enabled else 0)
+    expected_keys = [
+        ("tenant",),
+        (("first-image", 0),),
+        None,
+        None,
+        (("second-image", 0),),
+        None,
+    ]
+    # Nothing was published before this call, so the first run's skipped
+    # context starts at the root even when the caller's offset is nonzero.
+    previous_end = 0
     for event, (lo, hi) in zip(events, runs):
         assert isinstance(event, BlockStored)
         assert event.block_hashes == [
