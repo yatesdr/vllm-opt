@@ -783,6 +783,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                alignment_tokens=self._cache_hit_alignment_tokens,
             )
 
     def find_longest_cache_hit(

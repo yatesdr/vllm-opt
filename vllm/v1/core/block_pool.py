@@ -508,6 +508,10 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
+        skipped_parent_block_hash: ExternalBlockHash | None = None,
+        skipped_start_token_idx: int | None = None,
+        skipped_end_token_idx: int | None = None,
+        skipped_extra_keys: list[tuple[Any, ...] | None] | None = None,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
@@ -524,6 +528,14 @@ class BlockPool:
             medium=MEDIUM_GPU,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
+            skipped_parent_block_hash=skipped_parent_block_hash,
+            skipped_token_ids=(
+                request.all_token_ids[skipped_start_token_idx:skipped_end_token_idx]
+                if skipped_start_token_idx is not None
+                and skipped_end_token_idx is not None
+                else None
+            ),
+            skipped_extra_keys=skipped_extra_keys,
             group_idx=kv_cache_group_id,
         )
 

@@ -1096,6 +1096,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
+        drop_last_prefix_cache_block=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
@@ -3859,6 +3860,7 @@ def test_hybrid_fine_hit_retention_preserves_materialized_fallback():
         mamba_partial_cache_hit=True,
         hash_block_size=32,
         mamba_has_prefill_checkpoint_blocks=False,
+        drop_last_prefix_cache_block=False,
     )
     chunk_ends = []
     while request.num_computed_tokens < request.num_tokens:
@@ -4823,19 +4825,28 @@ def test_sparse_block_stored_runs(start, mask, null_indices, runs, events_enable
             if lo
             else None
         )
-        expected_keys = [
-            ("tenant",),
-            (("first-image", 0),),
-            None,
-            None,
-            (("second-image", 0),),
-            None,
-        ][lo:hi]
-        assert event.extra_keys == expected_keys
+        assert event.extra_keys == expected_keys[lo:hi]
+        if lo > previous_end:
+            assert event.skipped_parent_block_hash == (
+                kv_cache_utils.maybe_convert_block_hash(
+                    req.block_hashes[previous_end - 1]
+                )
+                if previous_end
+                else None
+            )
+            assert event.skipped_token_ids == list(
+                range(previous_end * block_size, lo * block_size)
+            )
+            assert event.skipped_extra_keys == expected_keys[previous_end:lo]
+        else:
+            assert event.skipped_parent_block_hash is None
+            assert event.skipped_token_ids is None
+            assert event.skipped_extra_keys is None
         assert event.block_size == block_size
         assert event.group_idx == 2
         assert event.medium == MEDIUM_GPU
         assert len(event.token_ids) == block_size * len(event.block_hashes)
+        previous_end = hi
     batch = KVEventBatch(ts=0.0, events=events)
     encoded = msgspec.msgpack.encode(batch)
     assert (
